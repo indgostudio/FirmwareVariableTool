@@ -40,6 +40,7 @@ jobs:
             if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
               $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
               $fixed.Add('  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf')
+              $fixed.Add('  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf')
             }
             if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
               $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
@@ -49,7 +50,7 @@ jobs:
             }
           }
           $fixed | Set-Content -Path $dsc -Encoding ascii
-          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, PcdLib, StackCheckLib.'
+          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, CpuLib, PcdLib, StackCheckLib.'
           Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
