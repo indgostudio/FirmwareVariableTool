@@ -1,3 +1,4 @@
+# Build-only workflow; firmware source remains the reviewed archive.
 name: Build EDK II VS2022 EFI binaries
 
 on:
