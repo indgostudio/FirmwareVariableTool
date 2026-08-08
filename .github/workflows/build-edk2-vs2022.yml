@@ -77,8 +77,8 @@ jobs:
           $actual = (git -C edk2 rev-parse HEAD).Trim()
           Write-Host "EDK II commit: $actual"
           if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
-          git -C edk2 submodule update --init --depth 1 BaseTools/Source/C/BrotliCompress/brotli
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize BaseTools Brotli dependency' }
+          git -C edk2 submodule update --init --depth 1 BaseTools/Source/C/BrotliCompress/brotli MdePkg/Library/MipiSysTLib/mipisyst
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize required EDK II submodules' }
           Copy-Item -Recurse -Force 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg' 'edk2/UefiVarToolPkg'
 
       - name: Build X64 RELEASE with VS2022
