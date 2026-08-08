@@ -18,30 +18,21 @@ jobs:
       EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
       REVIEWED_SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
       INVENTORY_DELTA_SHA256: b3671b57088a96dd47702c64786e97b5002b89174dd393052f250bf213f642e3
+      INVENTORY_EDK2_COMPAT_SHA256: ef5e4fbdc1f43be3e4b1cd5a1345782e459a403b4721bfaccfccc64857ada152
+
     steps:
       - name: Checkout exact build commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Assert inventory build contract inputs
+      - name: Reconstruct reviewed source and enforce inventory build contract
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          "BUILD_PROFILE=$env:BUILD_PROFILE" | Set-Content 'contract.log' -Encoding ascii
-          "GITHUB_EVENT_NAME=$env:GITHUB_EVENT_NAME" | Add-Content 'contract.log'
-          "GITHUB_REF=$env:GITHUB_REF" | Add-Content 'contract.log'
-          "GITHUB_SHA=$env:GITHUB_SHA" | Add-Content 'contract.log'
-          $checkoutSha = (git rev-parse HEAD).Trim()
-          "CHECKOUT_SHA=$checkoutSha" | Add-Content 'contract.log'
-          Write-Host "Build profile: $env:BUILD_PROFILE"
-          Write-Host "Event: $env:GITHUB_EVENT_NAME"
-          Write-Host "Ref: $env:GITHUB_REF"
-          Write-Host "GitHub SHA: $env:GITHUB_SHA"
-          Write-Host "Checked-out SHA: $checkoutSha"
 
           if ($env:BUILD_PROFILE -ne 'inventory') {
-            throw "This workflow is an inventory build contract; BUILD_PROFILE was '$env:BUILD_PROFILE'"
+            throw "This workflow requires BUILD_PROFILE=inventory; got '$env:BUILD_PROFILE'"
           }
 
           $required = @(
@@ -53,72 +44,53 @@ jobs:
             'ci/source.part04.b64',
             'ci/inventory.patch.part00.b64',
             'ci/inventory.patch.part01.b64',
-            'ci/inventory_delta.sha256'
+            'ci/inventory_delta.sha256',
+            'ci/inventory-edk2-compat.patch',
+            'ci/inventory_edk2_compat.sha256'
           )
           foreach ($path in $required) {
             if (-not (Test-Path $path -PathType Leaf)) {
-              throw "Inventory build requested but required input is missing: $path"
+              throw "Inventory build required input is missing: $path"
             }
           }
 
-          Write-Host '--- ci inventory ---'
-          Get-ChildItem 'ci' | Sort-Object Name | Format-Table Name,Length
-          Get-ChildItem 'ci' | Sort-Object Name | ForEach-Object {
-            "CI_FILE=$($_.Name) SIZE=$($_.Length)" | Add-Content 'contract.log'
-          }
+          $checkoutSha = (git rev-parse HEAD).Trim()
+          @(
+            "BUILD_PROFILE=$env:BUILD_PROFILE",
+            "GITHUB_EVENT_NAME=$env:GITHUB_EVENT_NAME",
+            "GITHUB_REF=$env:GITHUB_REF",
+            "GITHUB_SHA=$env:GITHUB_SHA",
+            "CHECKOUT_SHA=$checkoutSha"
+          ) | Set-Content 'contract.log' -Encoding ascii
 
           $sourceParts = @(Get-ChildItem 'ci/source.part*.b64' | Sort-Object Name)
-          if ($sourceParts.Count -ne 5) {
-            throw "Expected exactly 5 reviewed source parts, found $($sourceParts.Count)"
-          }
-
-          $deltaParts = @(Get-ChildItem 'ci/inventory.patch.part*.b64' | Sort-Object Name)
-          if ($deltaParts.Count -ne 2) {
-            throw "Expected exactly 2 inventory delta parts, found $($deltaParts.Count)"
-          }
-          $expectedDeltaNames = @('inventory.patch.part00.b64','inventory.patch.part01.b64')
-          $actualDeltaNames = @($deltaParts | ForEach-Object { $_.Name })
-          if (($actualDeltaNames -join ',') -ne ($expectedDeltaNames -join ',')) {
-            throw "Unexpected inventory delta part set: $($actualDeltaNames -join ', ')"
-          }
-          "INVENTORY_DELTA_PART_COUNT=$($deltaParts.Count)" | Add-Content 'contract.log'
-          foreach ($part in $deltaParts) {
-            "INVENTORY_DELTA_PART=$($part.Name) SIZE=$($part.Length)" | Add-Content 'contract.log'
-          }
-
-      - name: Reconstruct reviewed source, apply inventory delta, and apply proven build fixes
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
+          if ($sourceParts.Count -ne 5) { throw "Expected exactly 5 source parts, found $($sourceParts.Count)" }
           $sourceHashFile = (Get-Content 'ci/source.sha256' -Raw).Trim().ToLowerInvariant()
           if ($sourceHashFile -ne $env:REVIEWED_SOURCE_SHA256) {
-            throw "ci/source.sha256 does not match the approved reviewed-source SHA256: $sourceHashFile"
+            throw "ci/source.sha256 does not match approved reviewed source SHA256: $sourceHashFile"
           }
-
-          $parts = @(Get-ChildItem 'ci/source.part*.b64' | Sort-Object Name)
-          if ($parts.Count -ne 5) { throw "Expected 5 source parts, found $($parts.Count)" }
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
-          [IO.File]::WriteAllBytes('FirmwareVariableTool-source.zip', [Convert]::FromBase64String($b64))
+          $sourceB64 = ($sourceParts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('FirmwareVariableTool-source.zip', [Convert]::FromBase64String($sourceB64))
           $actualSource = (Get-FileHash 'FirmwareVariableTool-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Reviewed source SHA256 expected: $env:REVIEWED_SOURCE_SHA256"
-          Write-Host "Reviewed source SHA256 actual:   $actualSource"
           if ($actualSource -ne $env:REVIEWED_SOURCE_SHA256) {
             throw "Reviewed source SHA256 mismatch: $actualSource"
           }
           Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
 
+          $deltaParts = @(Get-ChildItem 'ci/inventory.patch.part*.b64' | Sort-Object Name)
+          if ($deltaParts.Count -ne 2) { throw "Expected exactly 2 inventory delta parts, found $($deltaParts.Count)" }
+          $expectedDeltaNames = @('inventory.patch.part00.b64','inventory.patch.part01.b64')
+          $actualDeltaNames = @($deltaParts | ForEach-Object { $_.Name })
+          if (($actualDeltaNames -join ',') -ne ($expectedDeltaNames -join ',')) {
+            throw "Unexpected inventory delta part set: $($actualDeltaNames -join ', ')"
+          }
           $deltaHashFile = (Get-Content 'ci/inventory_delta.sha256' -Raw).Trim().ToLowerInvariant()
           if ($deltaHashFile -ne $env:INVENTORY_DELTA_SHA256) {
-            throw "ci/inventory_delta.sha256 does not match the approved inventory delta SHA256: $deltaHashFile"
+            throw "ci/inventory_delta.sha256 does not match approved inventory delta SHA256: $deltaHashFile"
           }
-          $deltaParts = @(Get-ChildItem 'ci/inventory.patch.part*.b64' | Sort-Object Name)
-          if ($deltaParts.Count -ne 2) { throw "Expected 2 inventory delta parts, found $($deltaParts.Count)" }
           $deltaB64 = ($deltaParts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
           [IO.File]::WriteAllBytes('inventory-feature.patch.gz', [Convert]::FromBase64String($deltaB64))
           $actualDelta = (Get-FileHash 'inventory-feature.patch.gz' -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Inventory delta SHA256 expected: $env:INVENTORY_DELTA_SHA256"
-          Write-Host "Inventory delta SHA256 actual:   $actualDelta"
           if ($actualDelta -ne $env:INVENTORY_DELTA_SHA256) {
             throw "Inventory delta SHA256 mismatch: $actualDelta"
           }
@@ -133,19 +105,31 @@ jobs:
           } finally { $inStream.Dispose() }
 
           $sourceRoot = Join-Path $PWD 'reviewed-src/FirmwareVariableTool'
-          $patchPath = Join-Path $PWD 'inventory-feature.patch'
           $patchDirectory = 'reviewed-src/FirmwareVariableTool'
+          $featurePatch = Join-Path $PWD 'inventory-feature.patch'
+          git apply --stat --directory=$patchDirectory $featurePatch
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to inspect inventory feature patch targets' }
+          git apply --check --directory=$patchDirectory $featurePatch
+          if ($LASTEXITCODE -ne 0) { throw 'Inventory feature patch does not apply cleanly' }
+          git apply --directory=$patchDirectory $featurePatch
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to apply inventory feature patch' }
 
-          # git apply is repository-aware. Running it from a nested untracked extraction
-          # can return success while filtering every patch path out. Anchor it explicitly.
-          Write-Host '--- Inventory patch target paths ---'
-          git apply --stat --directory=$patchDirectory $patchPath
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to inspect inventory source delta targets' }
-          git apply --check --directory=$patchDirectory $patchPath
-          if ($LASTEXITCODE -ne 0) { throw 'Inventory source delta does not apply cleanly to reviewed source root' }
-          git apply --directory=$patchDirectory $patchPath
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to apply inventory source delta to reviewed source root' }
-          Write-Host 'Inventory source delta applied cleanly to reviewed MVP source.'
+          # Real build failure from runs #23/#24/#27: MSVC RELEASE lowered the
+          # BuildDumpFileName counted copy to CRT memcpy. Apply the reviewed,
+          # hashed EDK II compatibility patch that uses BaseMemoryLib CopyMem.
+          $compatHashFile = (Get-Content 'ci/inventory_edk2_compat.sha256' -Raw).Trim().ToLowerInvariant()
+          if ($compatHashFile -ne $env:INVENTORY_EDK2_COMPAT_SHA256) {
+            throw "ci/inventory_edk2_compat.sha256 does not match approved compatibility SHA256: $compatHashFile"
+          }
+          $actualCompat = (Get-FileHash 'ci/inventory-edk2-compat.patch' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualCompat -ne $env:INVENTORY_EDK2_COMPAT_SHA256) {
+            throw "Inventory EDK II compatibility patch SHA256 mismatch: $actualCompat"
+          }
+          $compatPatch = Join-Path $PWD 'ci/inventory-edk2-compat.patch'
+          git apply --check --directory=$patchDirectory $compatPatch
+          if ($LASTEXITCODE -ne 0) { throw 'Inventory EDK II compatibility patch does not apply cleanly' }
+          git apply --directory=$patchDirectory $compatPatch
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to apply Inventory EDK II compatibility patch' }
 
           $pkg = Join-Path $sourceRoot 'UefiVarToolPkg'
           $dsc = Join-Path $pkg 'UefiVarToolPkg.dsc'
@@ -157,60 +141,49 @@ jobs:
             (Join-Path $pkg 'App/Core/InventoryEnumerator.c'),
             (Join-Path $pkg 'App/Core/InventoryFormat.c')
           )
-
-          if (-not (Test-Path $dsc -PathType Leaf)) {
-            throw 'Reviewed UefiVarToolPkg DSC missing after inventory delta'
-          }
-          if (-not (Test-Path $inventoryInf -PathType Leaf)) {
-            throw 'Inventory delta did not materialize UefiVarToolPkg/InventoryVarTool.inf'
-          }
+          if (-not (Test-Path $dsc -PathType Leaf)) { throw 'UefiVarToolPkg.dsc missing after patch application' }
+          if (-not (Test-Path $inventoryInf -PathType Leaf)) { throw 'InventoryVarTool.inf missing after patch application' }
           foreach ($source in $inventorySources) {
-            if (-not (Test-Path $source -PathType Leaf)) {
-              throw "Inventory delta did not materialize required source: $source"
-            }
+            if (-not (Test-Path $source -PathType Leaf)) { throw "Required inventory source missing: $source" }
           }
-
           $dscText = Get-Content $dsc -Raw
           if (-not $dscText.Contains('UefiVarToolPkg/InventoryVarTool.inf')) {
-            throw 'InventoryVarTool.inf is not registered in UefiVarToolPkg.dsc [Components]'
+            throw 'InventoryVarTool.inf is not registered in DSC [Components]'
+          }
+
+          $inventoryMain = Join-Path $pkg 'App/InventoryVarTool.c'
+          $inventoryMainText = Get-Content $inventoryMain -Raw
+          if (-not $inventoryMainText.Contains('CopyMem(&Out[Pos], Sanitized, NameLength);')) {
+            throw 'Proven BuildDumpFileName CopyMem compatibility fix is not present'
           }
 
           $sourceSetVariableMatches = 0
           foreach ($source in $inventorySources) {
-            $text = Get-Content $source -Raw
             $sourceSetVariableMatches += [regex]::Matches(
-              $text,
+              (Get-Content $source -Raw),
               [regex]::Escape('SetVariable'),
               [Text.RegularExpressions.RegexOptions]::CultureInvariant
             ).Count
           }
-          Write-Host "Inventory source SetVariable matches: $sourceSetVariableMatches"
           if ($sourceSetVariableMatches -ne 0) {
             throw "Inventory source contains $sourceSetVariableMatches SetVariable reference(s)"
           }
-
           $infText = Get-Content $inventoryInf -Raw
           foreach ($forbidden in @('ENABLE_FIRMWARE_WRITES','UefiRuntimeAdapter.c','PatchModel.c','PatchFile.c')) {
-            if ($infText.Contains($forbidden)) {
-              throw "Inventory INF contains forbidden token: $forbidden"
-            }
+            if ($infText.Contains($forbidden)) { throw "Inventory INF contains forbidden token: $forbidden" }
           }
 
-          # Inventory feature materialization and EDK II compatibility are independent.
-          # Apply the already-proven Run #18 build-only fixes idempotently.
+          # Proven EDK II compatibility mappings from prior real build failures.
           $currentDscLines = @(Get-Content $dsc)
           $afterDebug = @(
             '  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf',
             '  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf',
             '  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf'
           ) | Where-Object { $currentDscLines -notcontains $_ }
-          $afterMemory = @(
-            '  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf'
-          ) | Where-Object { $currentDscLines -notcontains $_ }
-          $afterPrint = @(
-            '  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf'
-          ) | Where-Object { $currentDscLines -notcontains $_ }
-
+          $afterMemory = @('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf') |
+            Where-Object { $currentDscLines -notcontains $_ }
+          $afterPrint = @('  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf') |
+            Where-Object { $currentDscLines -notcontains $_ }
           $fixed = New-Object System.Collections.Generic.List[string]
           foreach ($line in $currentDscLines) {
             $fixed.Add($line)
@@ -235,20 +208,16 @@ jobs:
           )
           $postFixDscLines = @(Get-Content $dsc)
           foreach ($mapping in $requiredMappings) {
-            if ($postFixDscLines -notcontains $mapping) {
-              throw "Failed to materialize proven DSC compatibility mapping: $mapping"
-            }
+            if ($postFixDscLines -notcontains $mapping) { throw "Required DSC mapping missing: $mapping" }
           }
 
           foreach ($inf in @((Join-Path $pkg 'ReadOnlyVarTool.inf'), (Join-Path $pkg 'WriteVarTool.inf'))) {
             $lines = @(Get-Content $inf)
             if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
-              $outLines = New-Object System.Collections.Generic.List[string]
-              foreach ($line in $lines) { $outLines.Add($line) }
-              $outLines.Add('')
-              $outLines.Add('[Protocols]')
-              $outLines.Add('  gEfiLoadedImageProtocolGuid')
-              $outLines | Set-Content -Path $inf -Encoding ascii
+              $lines += ''
+              $lines += '[Protocols]'
+              $lines += '  gEfiLoadedImageProtocolGuid'
+              $lines | Set-Content -Path $inf -Encoding ascii
             }
           }
 
@@ -261,12 +230,15 @@ jobs:
             Set-Content -Path $patchFile -Value $patchText -Encoding ascii -NoNewline
           }
 
-          "REVIEWED_SOURCE_ACTUAL_SHA256=$actualSource" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INVENTORY_DELTA_ACTUAL_SHA256=$actualDelta" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INVENTORY_SOURCE_PRESENT=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INVENTORY_INF_PRESENT=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INVENTORY_DSC_REGISTERED=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INVENTORY_SOURCE_SETVARIABLE_MATCHES=$sourceSetVariableMatches" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @(
+            "REVIEWED_SOURCE_ACTUAL_SHA256=$actualSource",
+            "INVENTORY_DELTA_ACTUAL_SHA256=$actualDelta",
+            "INVENTORY_EDK2_COMPAT_ACTUAL_SHA256=$actualCompat",
+            'INVENTORY_SOURCE_PRESENT=1',
+            'INVENTORY_INF_PRESENT=1',
+            'INVENTORY_DSC_REGISTERED=1',
+            "INVENTORY_SOURCE_SETVARIABLE_MATCHES=$sourceSetVariableMatches"
+          ) | ForEach-Object { $_ | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
 
       - name: Locate Visual Studio 2022 toolchain
         shell: pwsh
@@ -279,7 +251,6 @@ jobs:
           if (-not (Test-Path $devcmd)) { throw "VsDevCmd.bat missing: $devcmd" }
           "VS_INSTALL=$vs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VS_DEVCMD=$devcmd" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Visual Studio install: $vs"
 
       - name: Install pinned NASM
         shell: pwsh
@@ -288,11 +259,10 @@ jobs:
           choco install nasm --version=2.16.03 -y --no-progress
           if ($LASTEXITCODE -ne 0) { throw "Chocolatey NASM install failed with exit code $LASTEXITCODE" }
           $nasmPath = 'C:\Program Files\NASM\nasm.exe'
-          if (-not (Test-Path $nasmPath)) { throw "NASM executable not found after install: $nasmPath" }
+          if (-not (Test-Path $nasmPath)) { throw "NASM executable not found: $nasmPath" }
           $nasmDir = Split-Path $nasmPath -Parent
           $nasmDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           $env:Path = "$nasmDir;$env:Path"
-          Write-Host "NASM executable: $nasmPath"
           & $nasmPath -v
           if ($LASTEXITCODE -ne 0) { throw 'NASM version check failed' }
 
@@ -306,7 +276,6 @@ jobs:
           git -C edk2 fetch --depth 1 origin $env:EDK2_COMMIT
           git -C edk2 checkout --detach FETCH_HEAD
           $actual = (git -C edk2 rev-parse HEAD).Trim()
-          Write-Host "EDK II commit: $actual"
           if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
           git -C edk2 submodule update --init --depth 1 BaseTools/Source/C/BrotliCompress/brotli MdePkg/Library/MipiSysTLib/mipisyst
           if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize required EDK II submodules' }
@@ -328,12 +297,10 @@ jobs:
           echo EDK2_COMMIT=%EDK2_COMMIT%
           echo VS_INSTALL=%VS_INSTALL%
           echo ============================================================
-          rem EDK II Windows BaseTools default to an IA32 host build.
           call "%VS_DEVCMD%" -arch=x86 -host_arch=x64
           if errorlevel 1 exit /b %errorlevel%
           echo --- MSVC X64 TARGET TOOLCHAIN ---
           "%VCToolsInstallDir%bin\Hostx64\x64\cl.exe" /Bv
-          rem /Bv prints version then reports D8003 without a source file; reset status.
           ver >nul
           echo --- NASM TOOLCHAIN ---
           where nasm
@@ -361,64 +328,43 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
           function Assert-PeX64 {
             param([Parameter(Mandatory=$true)][string]$Path)
             $bytes = [IO.File]::ReadAllBytes($Path)
             if ($bytes.Length -lt 64) { throw "PE/COFF artifact is too small: $Path" }
-            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Missing MZ header: $Path"
-            }
+            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "Missing MZ header: $Path" }
             $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-            if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) {
-              throw "Invalid PE header offset: $Path"
-            }
-            if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
-                $bytes[$peOffset + 2] -ne 0x00 -or $bytes[$peOffset + 3] -ne 0x00) {
+            if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) { throw "Invalid PE header offset: $Path" }
+            if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
               throw "Missing PE signature: $Path"
             }
             $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-            if ($machine -ne 0x8664) {
-              throw ("Unexpected PE machine 0x{0:X4} for {1}; expected AMD64 0x8664" -f $machine, $Path)
-            }
-          }
-
-          if ($env:BUILD_PROFILE -ne 'inventory') {
-            throw "Artifact verification requires BUILD_PROFILE=inventory, got '$env:BUILD_PROFILE'"
+            if ($machine -ne 0x8664) { throw ("Unexpected PE machine 0x{0:X4}: {1}" -f $machine, $Path) }
           }
 
           $out = Join-Path $env:GITHUB_WORKSPACE 'edk2/Build/UefiVarTool/RELEASE_VS2022/X64'
-          $expected = @(
-            'ReadOnlyVarTool.efi',
-            'WriteVarTool.efi',
-            'InventoryVarTool.efi'
-          )
-
+          $expected = @('ReadOnlyVarTool.efi','WriteVarTool.efi','InventoryVarTool.efi')
           foreach ($name in $expected) {
             $path = Join-Path $out $name
             if (-not (Test-Path $path -PathType Leaf)) { throw "Missing required EFI output: $path" }
             if ((Get-Item $path).Length -le 0) { throw "Required EFI output is empty: $name" }
             Assert-PeX64 -Path $path
           }
-
           if (-not (Select-String -Path 'build.log' -SimpleMatch 'InventoryVarTool' -Quiet)) {
-            throw 'InventoryVarTool never appeared in the EDK II build log'
+            throw 'InventoryVarTool never appeared in EDK II build log'
           }
 
           $inventory = Join-Path $out 'InventoryVarTool.efi'
           $bytes = [IO.File]::ReadAllBytes($inventory)
           $ascii = [Text.Encoding]::ASCII.GetString($bytes)
           $unicode = [Text.Encoding]::Unicode.GetString($bytes)
-          $binarySetVariableMatches = (
-            [regex]::Matches($ascii, [regex]::Escape('SetVariable')).Count +
-            [regex]::Matches($unicode, [regex]::Escape('SetVariable')).Count
-          )
-          Write-Host "Inventory binary SetVariable matches: $binarySetVariableMatches"
+          $binarySetVariableMatches = [regex]::Matches($ascii, [regex]::Escape('SetVariable')).Count +
+                                      [regex]::Matches($unicode, [regex]::Escape('SetVariable')).Count
           if ($binarySetVariableMatches -ne 0) {
-            throw "InventoryVarTool.efi contains $binarySetVariableMatches SetVariable text/symbol match(es)"
+            throw "InventoryVarTool.efi contains $binarySetVariableMatches SetVariable match(es)"
           }
 
-          $manifest = @(
+          @(
             '',
             '=== BUILD ACCEPTANCE MANIFEST ===',
             "BUILD_PROFILE=$env:BUILD_PROFILE",
@@ -428,6 +374,7 @@ jobs:
             'TOOLCHAIN=VS2022',
             "REVIEWED_SOURCE_SHA256=$env:REVIEWED_SOURCE_ACTUAL_SHA256",
             "INVENTORY_DELTA_SHA256=$env:INVENTORY_DELTA_ACTUAL_SHA256",
+            "INVENTORY_EDK2_COMPAT_SHA256=$env:INVENTORY_EDK2_COMPAT_ACTUAL_SHA256",
             "INVENTORY_SOURCE_PRESENT=$env:INVENTORY_SOURCE_PRESENT",
             "INVENTORY_INF_PRESENT=$env:INVENTORY_INF_PRESENT",
             "INVENTORY_DSC_REGISTERED=$env:INVENTORY_DSC_REGISTERED",
@@ -436,8 +383,7 @@ jobs:
             "INVENTORY_BINARY_SETVARIABLE_MATCHES=$binarySetVariableMatches",
             'PE_AMD64_VALIDATED=1',
             'BUILD_COMMAND=build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc'
-          )
-          $manifest | Add-Content 'build.log'
+          ) | Add-Content 'build.log'
 
           New-Item -ItemType Directory -Force -Path 'efi-artifacts' | Out-Null
           foreach ($name in $expected) {
@@ -447,7 +393,6 @@ jobs:
             $hash = (Get-FileHash $dst -Algorithm SHA256).Hash.ToLowerInvariant()
             "$name SHA256=$hash" | Add-Content 'build.log'
           }
-
           Copy-Item 'build.log' 'efi-artifacts/build.log'
           Get-ChildItem 'efi-artifacts' | Format-Table Name,Length
 
