@@ -20,7 +20,7 @@ jobs:
       - name: Checkout build branch
         uses: actions/checkout@v4
 
-      - name: Reconstruct reviewed source and apply build-required DSC fix
+      - name: Reconstruct reviewed source and apply build-required fixes
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -56,18 +56,28 @@ jobs:
             'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/ReadOnlyVarTool.inf',
             'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/WriteVarTool.inf'
           )) {
-            $infText = Get-Content $inf -Raw
-            if ($infText -notmatch '(?m)^\s*gEfiLoadedImageProtocolGuid\s*$') {
-              if ($infText -notmatch '(?m)^\s*gEfiSimpleFileSystemProtocolGuid\s*$') {
-                throw "Expected gEfiSimpleFileSystemProtocolGuid declaration was not found in $inf"
+            $lines = @(Get-Content $inf)
+            if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
+              $protocolIndex = -1
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i].Trim() -eq '[Protocols]') {
+                  $protocolIndex = $i
+                  break
+                }
               }
-              $infText = [regex]::Replace(
-                $infText,
-                '(?m)^(\s*gEfiSimpleFileSystemProtocolGuid\s*)$',
-                '$1' + "`r`n  gEfiLoadedImageProtocolGuid",
-                1
-              )
-              Set-Content -Path $inf -Value $infText -Encoding ascii -NoNewline
+              $outLines = New-Object System.Collections.Generic.List[string]
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                $outLines.Add($lines[$i])
+                if ($i -eq $protocolIndex) {
+                  $outLines.Add('  gEfiLoadedImageProtocolGuid')
+                }
+              }
+              if ($protocolIndex -lt 0) {
+                $outLines.Add('')
+                $outLines.Add('[Protocols]')
+                $outLines.Add('  gEfiLoadedImageProtocolGuid')
+              }
+              $outLines | Set-Content -Path $inf -Encoding ascii
               Write-Host "Declared gEfiLoadedImageProtocolGuid in $inf after run #13 linker failure."
             }
           }
