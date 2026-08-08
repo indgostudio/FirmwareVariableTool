@@ -1,0 +1,132 @@
+# Build-only workflow; firmware source remains the reviewed archive.
+name: Build EDK II VS2022 EFI binaries
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
+      SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify reviewed source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = Get-ChildItem 'ci/source.part*.b64' | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source parts, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('FirmwareVariableTool-source.zip', [Convert]::FromBase64String($b64))
+          $actual = (Get-FileHash 'FirmwareVariableTool-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Reviewed source SHA256: $actual"
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA256 mismatch: $actual" }
+          Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
+          if (-not (Test-Path 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/UefiVarToolPkg.dsc')) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
+
+      - name: Locate Visual Studio 2022 toolchain
+        id: vs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio 2022 with C++ tools not found' }
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path $devcmd)) { throw "VsDevCmd.bat missing: $devcmd" }
+          "VS_INSTALL=$vs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VS_DEVCMD=$devcmd" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Visual Studio install: $vs"
+
+      - name: Checkout pinned EDK II
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone https://github.com/tianocore/edk2.git edk2
+          git -C edk2 checkout $env:EDK2_COMMIT
+          git -C edk2 submodule update --init --recursive
+          $actual = (git -C edk2 rev-parse HEAD).Trim()
+          Write-Host "EDK II commit: $actual"
+          if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
+          Copy-Item -Recurse -Force 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg' 'edk2/UefiVarToolPkg'
+
+      - name: Build X64 RELEASE with VS2022
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = $env:GITHUB_WORKSPACE
+          $cmd = @"
+          @echo off
+          setlocal
+          echo ============================================================
+          echo FirmwareVariableTool reproducible EDK II build
+          echo Runner OS: %OS%
+          echo GitHub runner: %ImageOS% %ImageVersion%
+          echo EDK2_COMMIT=%EDK2_COMMIT%
+          echo VS_INSTALL=%VS_INSTALL%
+          echo ============================================================
+          call "%VS_DEVCMD%" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          echo --- MSVC TOOLCHAIN ---
+          cl /Bv
+          if errorlevel 1 exit /b %errorlevel%
+          echo --- EDK II SETUP ---
+          cd /d "$workspace\edk2"
+          call edksetup.bat Rebuild
+          if errorlevel 1 exit /b %errorlevel%
+          echo --- EDK II COMMIT ---
+          git rev-parse HEAD
+          echo --- UEFI BUILD ---
+          build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc
+          exit /b %errorlevel%
+          "@
+          Set-Content -Path 'build-vs2022.cmd' -Value $cmd -Encoding ascii
+          cmd.exe /d /c 'build-vs2022.cmd > build.log 2>&1'
+          $code = $LASTEXITCODE
+          Get-Content 'build.log'
+          if ($code -ne 0) { throw "EDK II build failed with exit code $code" }
+
+      - name: Verify and stage EFI artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'edk2/Build/UefiVarTool/RELEASE_VS2022/X64'
+          $readOnly = Join-Path $out 'ReadOnlyVarTool.efi'
+          $writer = Join-Path $out 'WriteVarTool.efi'
+          if (-not (Test-Path $readOnly)) { throw "Missing artifact: $readOnly" }
+          if (-not (Test-Path $writer)) { throw "Missing artifact: $writer" }
+          New-Item -ItemType Directory -Force -Path 'efi-artifacts' | Out-Null
+          Copy-Item $readOnly 'efi-artifacts/ReadOnlyVarTool.efi'
+          Copy-Item $writer 'efi-artifacts/WriteVarTool.efi'
+          Copy-Item 'build.log' 'efi-artifacts/build.log'
+          "EDK II commit: $env:EDK2_COMMIT" | Add-Content 'efi-artifacts/build.log'
+          "Build command: build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc" | Add-Content 'efi-artifacts/build.log'
+          Get-FileHash 'efi-artifacts/ReadOnlyVarTool.efi','efi-artifacts/WriteVarTool.efi' -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Add-Content 'efi-artifacts/build.log'
+          Get-ChildItem 'efi-artifacts' | Format-Table Name,Length,LastWriteTime
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FirmwareVariableTool-build-log
+          path: |
+            build.log
+            build-vs2022.cmd
+          if-no-files-found: warn
+
+      - name: Upload EFI binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: FirmwareVariableTool-efi
+          path: efi-artifacts/
+          if-no-files-found: error
