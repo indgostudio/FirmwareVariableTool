@@ -17,7 +17,7 @@ jobs:
       BUILD_PROFILE: inventory
       EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
       REVIEWED_SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
-      INVENTORY_DELTA_SHA256: b3671b57088a96dd47702c64786e97b5002b89174dd393052f250bf213f642e3
+      INVENTORY_DELTA_SHA256: 647b834f288e16b017e430b3213fcc6e823e04cc17cd31ff0014e1a28ab7fe8d
     steps:
       - name: Checkout exact build commit
         uses: actions/checkout@v4
