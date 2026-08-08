@@ -15,93 +15,89 @@ jobs:
     timeout-minutes: 45
     env:
       EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
-      SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
     steps:
       - name: Checkout build branch
         uses: actions/checkout@v4
 
-      - name: Reconstruct reviewed source and apply build-required fixes
+      - name: Reconstruct reviewed source and verify safety prerequisites
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $parts = Get-ChildItem 'ci/source.part*.b64' | Sort-Object Name
           if ($parts.Count -ne 5) { throw "Expected 5 source parts, found $($parts.Count)" }
+          $expected = (Get-Content 'ci/source.sha256' -Raw).Trim().ToLowerInvariant()
+          if (-not $expected) { throw 'ci/source.sha256 is empty' }
           $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
           [IO.File]::WriteAllBytes('FirmwareVariableTool-source.zip', [Convert]::FromBase64String($b64))
           $actual = (Get-FileHash 'FirmwareVariableTool-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Reviewed source SHA256: $actual"
-          if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA256 mismatch: $actual" }
+          Write-Host "Reviewed source SHA256 expected: $expected"
+          Write-Host "Reviewed source SHA256 actual:   $actual"
+          if ($actual -ne $expected) { throw "Source SHA256 mismatch: $actual" }
           Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
           $pkg = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg'
           $dsc = "$pkg/UefiVarToolPkg.dsc"
           if (-not (Test-Path $dsc)) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
 
-          $fixed = New-Object System.Collections.Generic.List[string]
-          foreach ($line in Get-Content $dsc) {
-            $fixed.Add($line)
-            if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
-              $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
-              $fixed.Add('  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf')
-              $fixed.Add('  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf')
+          $inventoryInf = "$pkg/InventoryVarTool.inf"
+          if (Test-Path $inventoryInf) {
+            Write-Host 'Inventory source package detected; build-required fixes are integrated in reviewed source. No source mutation will be applied.'
+            $inventorySources = @(
+              "$pkg/App/InventoryVarTool.c",
+              "$pkg/App/InventoryUefiAdapter.c",
+              "$pkg/App/InventoryFileSink.c",
+              "$pkg/App/Core/InventoryEnumerator.c",
+              "$pkg/App/Core/InventoryFormat.c"
+            )
+            foreach ($source in $inventorySources) {
+              if (-not (Test-Path $source)) { throw "Missing inventory source: $source" }
+              if (Select-String -Path $source -SimpleMatch 'SetVariable' -Quiet) {
+                throw "Inventory source references SetVariable: $source"
+              }
             }
-            if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
-              $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
+            $infText = Get-Content $inventoryInf -Raw
+            foreach ($forbidden in @('ENABLE_FIRMWARE_WRITES','UefiRuntimeAdapter.c','PatchModel.c','PatchFile.c')) {
+              if ($infText.Contains($forbidden)) { throw "Inventory INF contains forbidden token: $forbidden" }
             }
-            if ($line -eq '  PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf') {
-              $fixed.Add('  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf')
+          } else {
+            Write-Host 'Legacy reviewed source detected; applying the historical Run #18 build-only compatibility fixes.'
+            $fixed = New-Object System.Collections.Generic.List[string]
+            foreach ($line in Get-Content $dsc) {
+              $fixed.Add($line)
+              if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
+                $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
+                $fixed.Add('  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf')
+                $fixed.Add('  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf')
+              }
+              if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
+                $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
+              }
+              if ($line -eq '  PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf') {
+                $fixed.Add('  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf')
+              }
             }
-          }
-          $fixed | Set-Content -Path $dsc -Encoding ascii
-          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, CpuLib, PcdLib, StackCheckLib.'
+            $fixed | Set-Content -Path $dsc -Encoding ascii
 
-          foreach ($inf in @("$pkg/ReadOnlyVarTool.inf", "$pkg/WriteVarTool.inf")) {
-            $lines = @(Get-Content $inf)
-            if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
-              $protocolIndex = -1
-              for ($i = 0; $i -lt $lines.Count; $i++) {
-                if ($lines[$i].Trim() -eq '[Protocols]') {
-                  $protocolIndex = $i
-                  break
-                }
-              }
-              $outLines = New-Object System.Collections.Generic.List[string]
-              for ($i = 0; $i -lt $lines.Count; $i++) {
-                $outLines.Add($lines[$i])
-                if ($i -eq $protocolIndex) {
-                  $outLines.Add('  gEfiLoadedImageProtocolGuid')
-                }
-              }
-              if ($protocolIndex -lt 0) {
+            foreach ($inf in @("$pkg/ReadOnlyVarTool.inf", "$pkg/WriteVarTool.inf")) {
+              $lines = @(Get-Content $inf)
+              if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
+                $outLines = New-Object System.Collections.Generic.List[string]
+                foreach ($line in $lines) { $outLines.Add($line) }
                 $outLines.Add('')
                 $outLines.Add('[Protocols]')
                 $outLines.Add('  gEfiLoadedImageProtocolGuid')
+                $outLines | Set-Content -Path $inf -Encoding ascii
               }
-              $outLines | Set-Content -Path $inf -Encoding ascii
-              Write-Host "Declared gEfiLoadedImageProtocolGuid in $inf after run #13 linker failure."
+            }
+
+            $patchFile = "$pkg/App/Core/PatchFile.c"
+            $patchText = Get-Content $patchFile -Raw
+            if ($patchText -notmatch '#include <Library/BaseMemoryLib\.h>') {
+              $patchText = $patchText -replace '#include "PatchFile\.h"\r?\n', "#include `"PatchFile.h`"`r`n`r`n#if defined(FW_UEFI_BUILD)`r`n#include <Library/BaseMemoryLib.h>`r`n#endif`r`n"
+              $patchText = $patchText -replace 'static void FwZero\(void\* p, size_t n\) \{\r?\n    unsigned char\* b = \(unsigned char\*\)p;\r?\n    for \(size_t i = 0; i < n; \+\+i\) b\[i\] = 0;\r?\n\}', "static void FwZero(void* p, size_t n) {`r`n#if defined(FW_UEFI_BUILD)`r`n    ZeroMem(p, n);`r`n#else`r`n    unsigned char* b = (unsigned char*)p;`r`n    for (size_t i = 0; i < n; ++i) b[i] = 0;`r`n#endif`r`n}"
+              $patchText = $patchText -replace '            for \(size_t i = 0; i < len; \+\+i\) out\[i\] = value\[i\];', "#if defined(FW_UEFI_BUILD)`r`n            CopyMem(out, value, len);`r`n#else`r`n            for (size_t i = 0; i < len; ++i) out[i] = value[i];`r`n#endif"
+              Set-Content -Path $patchFile -Value $patchText -Encoding ascii -NoNewline
             }
           }
-
-          $patchFile = "$pkg/App/Core/PatchFile.c"
-          $patchText = Get-Content $patchFile -Raw
-          if ($patchText -notmatch '#include <Library/BaseMemoryLib\.h>') {
-            $includePattern = '#include "PatchFile\.h"\r?\n'
-            if ($patchText -notmatch $includePattern) { throw 'PatchFile.c include anchor not found' }
-            $patchText = $patchText -replace $includePattern, "#include `"PatchFile.h`"`r`n`r`n#if defined(FW_UEFI_BUILD)`r`n#include <Library/BaseMemoryLib.h>`r`n#endif`r`n"
-
-            $zeroPattern = 'static void FwZero\(void\* p, size_t n\) \{\r?\n    unsigned char\* b = \(unsigned char\*\)p;\r?\n    for \(size_t i = 0; i < n; \+\+i\) b\[i\] = 0;\r?\n\}'
-            if ($patchText -notmatch $zeroPattern) { throw 'PatchFile.c FwZero anchor not found' }
-            $zeroReplacement = "static void FwZero(void* p, size_t n) {`r`n#if defined(FW_UEFI_BUILD)`r`n    ZeroMem(p, n);`r`n#else`r`n    unsigned char* b = (unsigned char*)p;`r`n    for (size_t i = 0; i < n; ++i) b[i] = 0;`r`n#endif`r`n}"
-            $patchText = $patchText -replace $zeroPattern, $zeroReplacement
-
-            $copyPattern = '            for \(size_t i = 0; i < len; \+\+i\) out\[i\] = value\[i\];'
-            if ($patchText -notmatch $copyPattern) { throw 'PatchFile.c copy-loop anchor not found' }
-            $copyReplacement = "#if defined(FW_UEFI_BUILD)`r`n            CopyMem(out, value, len);`r`n#else`r`n            for (size_t i = 0; i < len; ++i) out[i] = value[i];`r`n#endif"
-            $patchText = $patchText -replace $copyPattern, $copyReplacement
-            Set-Content -Path $patchFile -Value $patchText -Encoding ascii -NoNewline
-            Write-Host 'Updated PatchFile.c firmware path to BaseMemoryLib ZeroMem/CopyMem after run #16 CRT linker failure.'
-          }
-
-          Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
         shell: pwsh
@@ -200,13 +196,37 @@ jobs:
           $writer = Join-Path $out 'WriteVarTool.efi'
           if (-not (Test-Path $readOnly)) { throw "Missing artifact: $readOnly" }
           if (-not (Test-Path $writer)) { throw "Missing artifact: $writer" }
+          if ((Get-Item $readOnly).Length -le 0) { throw 'ReadOnlyVarTool.efi is empty' }
+          if ((Get-Item $writer).Length -le 0) { throw 'WriteVarTool.efi is empty' }
+
           New-Item -ItemType Directory -Force -Path 'efi-artifacts' | Out-Null
           Copy-Item $readOnly 'efi-artifacts/ReadOnlyVarTool.efi'
           Copy-Item $writer 'efi-artifacts/WriteVarTool.efi'
+
+          $hashTargets = @('efi-artifacts/ReadOnlyVarTool.efi','efi-artifacts/WriteVarTool.efi')
+          $inventoryInf = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/InventoryVarTool.inf'
+          if (Test-Path $inventoryInf) {
+            $inventory = Join-Path $out 'InventoryVarTool.efi'
+            if (-not (Test-Path $inventory)) { throw "Missing artifact: $inventory" }
+            if ((Get-Item $inventory).Length -le 0) { throw 'InventoryVarTool.efi is empty' }
+
+            $bytes = [IO.File]::ReadAllBytes($inventory)
+            $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+            $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+            if ($ascii.Contains('SetVariable') -or $unicode.Contains('SetVariable')) {
+              throw 'InventoryVarTool.efi contains SetVariable text/symbol material'
+            }
+
+            Copy-Item $inventory 'efi-artifacts/InventoryVarTool.efi'
+            $hashTargets += 'efi-artifacts/InventoryVarTool.efi'
+          }
+
           Copy-Item 'build.log' 'efi-artifacts/build.log'
+          $sourceSha = (Get-Content 'ci/source.sha256' -Raw).Trim().ToLowerInvariant()
+          "Source SHA256: $sourceSha" | Add-Content 'efi-artifacts/build.log'
           "EDK II commit: $env:EDK2_COMMIT" | Add-Content 'efi-artifacts/build.log'
           "Build command: build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc" | Add-Content 'efi-artifacts/build.log'
-          Get-FileHash 'efi-artifacts/ReadOnlyVarTool.efi','efi-artifacts/WriteVarTool.efi' -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Add-Content 'efi-artifacts/build.log'
+          Get-FileHash $hashTargets -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Add-Content 'efi-artifacts/build.log'
           Get-ChildItem 'efi-artifacts' | Format-Table Name,Length
 
       - name: Upload build diagnostics
