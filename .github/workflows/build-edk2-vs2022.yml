@@ -196,6 +196,18 @@ jobs:
             }
           }
 
+          # Diagnostic only: keep the build RELEASE, but disable LTCG for this module so
+          # a link failure leaves an ordinary COFF object that dumpbin can disassemble.
+          $glDiagnostic = '  MSFT:RELEASE_VS2022_X64_CC_FLAGS = /GL-'
+          $inventoryInfLines = @(Get-Content $inventoryInf)
+          if ($inventoryInfLines -notcontains $glDiagnostic) {
+            Add-Content -Path $inventoryInf -Value $glDiagnostic -Encoding ascii
+          }
+          if (-not (Select-String -Path $inventoryInf -SimpleMatch '/GL-' -Quiet)) {
+            throw 'Failed to apply InventoryVarTool module-scoped /GL- diagnostic override'
+          }
+          Write-Host 'InventoryVarTool diagnostic override applied: RELEASE module uses /GL-; global RELEASE flags remain unchanged.'
+
           # Inventory feature materialization and EDK II compatibility are independent.
           # Apply the already-proven Run #18 build-only fixes idempotently.
           $currentDscLines = @(Get-Content $dsc)
