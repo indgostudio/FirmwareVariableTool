@@ -355,7 +355,31 @@ jobs:
           cmd.exe /d /c 'build-vs2022.cmd > build.log 2>&1'
           $code = $LASTEXITCODE
           Get-Content 'build.log'
-          if ($code -ne 0) { throw "EDK II build failed with exit code $code" }
+          if ($code -ne 0) {
+            $inventoryObj = Get-ChildItem (Join-Path $workspace 'edk2\Build\UefiVarTool\RELEASE_VS2022\X64') -Filter 'InventoryVarTool.obj' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($inventoryObj) {
+              Copy-Item $inventoryObj.FullName 'InventoryVarTool.obj' -Force
+              Write-Host "Inventory object captured: $($inventoryObj.FullName)"
+              $dumpbin = Get-ChildItem (Join-Path $env:VS_INSTALL 'VC\Tools\MSVC') -Filter 'dumpbin.exe' -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin\.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+              if (-not $dumpbin) {
+                $dumpbin = Get-ChildItem (Join-Path $env:VS_INSTALL 'VC\Tools\MSVC') -Filter 'dumpbin.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              }
+              if ($dumpbin) {
+                Write-Host "DUMPBIN: $($dumpbin.FullName)"
+                & $dumpbin.FullName /DISASM /RELOCATIONS /SYMBOLS /LINENUMBERS $inventoryObj.FullName 2>&1 | Set-Content 'inventory-obj-dump.txt' -Encoding ascii
+                Write-Host '--- memcpy references in InventoryVarTool.obj ---'
+                Select-String -Path 'inventory-obj-dump.txt' -Pattern 'memcpy' -Context 16,16 | ForEach-Object { $_.ToString() | Write-Host }
+              } else {
+                'dumpbin.exe not found under Visual Studio installation' | Set-Content 'inventory-obj-dump.txt' -Encoding ascii
+              }
+            } else {
+              'InventoryVarTool.obj not found under EDK II build output' | Set-Content 'inventory-obj-dump.txt' -Encoding ascii
+            }
+            throw "EDK II build failed with exit code $code"
+          }
 
       - name: Verify inventory build contract and stage EFI artifacts
         shell: pwsh
@@ -460,6 +484,8 @@ jobs:
             contract.log
             build.log
             build-vs2022.cmd
+            inventory-obj-dump.txt
+            InventoryVarTool.obj
           if-no-files-found: warn
 
       - name: Upload EFI binaries
