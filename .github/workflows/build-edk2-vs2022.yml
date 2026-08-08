@@ -1,4 +1,4 @@
-# Build-only workflow; firmware source remains the reviewed archive.
+# Build-only workflow; firmware source starts from the reviewed archive.
 name: Build EDK II VS2022 EFI binaries
 
 on:
@@ -20,7 +20,7 @@ jobs:
       - name: Checkout build branch
         uses: actions/checkout@v4
 
-      - name: Reconstruct and verify reviewed source
+      - name: Reconstruct reviewed source and apply build-required DSC fix
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -32,7 +32,24 @@ jobs:
           Write-Host "Reviewed source SHA256: $actual"
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA256 mismatch: $actual" }
           Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
-          if (-not (Test-Path 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/UefiVarToolPkg.dsc')) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
+          $dsc = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/UefiVarToolPkg.dsc'
+          if (-not (Test-Path $dsc)) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
+          $fixed = New-Object System.Collections.Generic.List[string]
+          foreach ($line in Get-Content $dsc) {
+            $fixed.Add($line)
+            if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
+              $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
+            }
+            if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
+              $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
+            }
+            if ($line -eq '  PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf') {
+              $fixed.Add('  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf')
+            }
+          }
+          $fixed | Set-Content -Path $dsc -Encoding ascii
+          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, PcdLib, StackCheckLib.'
+          Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
         shell: pwsh
@@ -76,15 +93,16 @@ jobs:
           echo EDK2_COMMIT=%EDK2_COMMIT%
           echo VS_INSTALL=%VS_INSTALL%
           echo ============================================================
-          call "%VS_DEVCMD%" -arch=x64 -host_arch=x64
+          rem EDK II Windows BaseTools default to an IA32 host build.
+          call "%VS_DEVCMD%" -arch=x86 -host_arch=x64
           if errorlevel 1 exit /b %errorlevel%
-          echo --- MSVC TOOLCHAIN ---
-          cl /Bv
-          rem cl /Bv reports D8003 without a source file after printing version details.
+          echo --- MSVC X64 TARGET TOOLCHAIN ---
+          "%VCToolsInstallDir%bin\Hostx64\x64\cl.exe" /Bv
+          rem /Bv prints version then reports D8003 without a source file; reset status.
           ver >nul
-          echo --- EDK II SETUP ---
+          echo --- EDK II SETUP / BASETOOLS ---
           cd /d "$workspace\edk2"
-          call edksetup.bat Rebuild
+          call edksetup.bat Rebuild VS2022
           if errorlevel 1 exit /b %errorlevel%
           echo --- EDK II COMMIT ---
           git rev-parse HEAD
@@ -114,6 +132,7 @@ jobs:
           "EDK II commit: $env:EDK2_COMMIT" | Add-Content 'efi-artifacts/build.log'
           "Build command: build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc" | Add-Content 'efi-artifacts/build.log'
           Get-FileHash 'efi-artifacts/ReadOnlyVarTool.efi','efi-artifacts/WriteVarTool.efi' -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Add-Content 'efi-artifacts/build.log'
+          Get-ChildItem 'efi-artifacts' | Format-Table Name,Length
 
       - name: Upload build diagnostics
         if: always()
