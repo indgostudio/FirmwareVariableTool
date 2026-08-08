@@ -1,0 +1,14 @@
+diff --git a/UefiVarToolPkg/App/InventoryVarTool.c b/UefiVarToolPkg/App/InventoryVarTool.c
+index bccf86a..6cdbd74 100644
+--- a/UefiVarToolPkg/App/InventoryVarTool.c
++++ b/UefiVarToolPkg/App/InventoryVarTool.c
+@@ -99,7 +99,8 @@ static EFI_STATUS BuildDumpFileName(
+     for (UINTN Index = 0; Index < GuidLength; ++Index) Out[Pos++] = Guid[Index];
+     Out[Pos++] = '_';
+     Out[Pos++] = '_';
+-    for (UINTN Index = 0; Index < NameLength; ++Index) Out[Pos++] = Sanitized[Index];
++    CopyMem(&Out[Pos], Sanitized, NameLength);
++    Pos += NameLength;
+     Out[Pos++] = '.';
+     Out[Pos++] = 'b';
+     Out[Pos++] = 'i';
