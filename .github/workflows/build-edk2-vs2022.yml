@@ -39,6 +39,7 @@ jobs:
             $fixed.Add($line)
             if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
               $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
+              $fixed.Add('  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf')
             }
             if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
               $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
@@ -48,7 +49,7 @@ jobs:
             }
           }
           $fixed | Set-Content -Path $dsc -Encoding ascii
-          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, PcdLib, StackCheckLib.'
+          Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, PcdLib, StackCheckLib.'
           Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
@@ -76,6 +77,8 @@ jobs:
           $actual = (git -C edk2 rev-parse HEAD).Trim()
           Write-Host "EDK II commit: $actual"
           if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
+          git -C edk2 submodule update --init --depth 1 BaseTools/Source/C/BrotliCompress/brotli
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize BaseTools Brotli dependency' }
           Copy-Item -Recurse -Force 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg' 'edk2/UefiVarToolPkg'
 
       - name: Build X64 RELEASE with VS2022
@@ -103,7 +106,9 @@ jobs:
           echo --- EDK II SETUP / BASETOOLS ---
           cd /d "$workspace\edk2"
           call edksetup.bat Rebuild VS2022
-          if errorlevel 1 exit /b %errorlevel%
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenFw.exe" exit /b 90
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenFfs.exe" exit /b 91
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenSec.exe" exit /b 92
           echo --- EDK II COMMIT ---
           git rev-parse HEAD
           echo --- UEFI BUILD ---
