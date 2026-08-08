@@ -32,8 +32,10 @@ jobs:
           Write-Host "Reviewed source SHA256: $actual"
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA256 mismatch: $actual" }
           Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
-          $dsc = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/UefiVarToolPkg.dsc'
+          $pkg = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg'
+          $dsc = "$pkg/UefiVarToolPkg.dsc"
           if (-not (Test-Path $dsc)) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
+
           $fixed = New-Object System.Collections.Generic.List[string]
           foreach ($line in Get-Content $dsc) {
             $fixed.Add($line)
@@ -52,10 +54,7 @@ jobs:
           $fixed | Set-Content -Path $dsc -Encoding ascii
           Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, CpuLib, PcdLib, StackCheckLib.'
 
-          foreach ($inf in @(
-            'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/ReadOnlyVarTool.inf',
-            'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/WriteVarTool.inf'
-          )) {
+          foreach ($inf in @("$pkg/ReadOnlyVarTool.inf", "$pkg/WriteVarTool.inf")) {
             $lines = @(Get-Content $inf)
             if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
               $protocolIndex = -1
@@ -81,6 +80,27 @@ jobs:
               Write-Host "Declared gEfiLoadedImageProtocolGuid in $inf after run #13 linker failure."
             }
           }
+
+          $patchFile = "$pkg/App/Core/PatchFile.c"
+          $patchText = Get-Content $patchFile -Raw
+          if ($patchText -notmatch '#include <Library/BaseMemoryLib\.h>') {
+            $includePattern = '#include "PatchFile\.h"\r?\n'
+            if ($patchText -notmatch $includePattern) { throw 'PatchFile.c include anchor not found' }
+            $patchText = $patchText -replace $includePattern, "#include `"PatchFile.h`"`r`n`r`n#if defined(FW_UEFI_BUILD)`r`n#include <Library/BaseMemoryLib.h>`r`n#endif`r`n"
+
+            $zeroPattern = 'static void FwZero\(void\* p, size_t n\) \{\r?\n    unsigned char\* b = \(unsigned char\*\)p;\r?\n    for \(size_t i = 0; i < n; \+\+i\) b\[i\] = 0;\r?\n\}'
+            if ($patchText -notmatch $zeroPattern) { throw 'PatchFile.c FwZero anchor not found' }
+            $zeroReplacement = "static void FwZero(void* p, size_t n) {`r`n#if defined(FW_UEFI_BUILD)`r`n    ZeroMem(p, n);`r`n#else`r`n    unsigned char* b = (unsigned char*)p;`r`n    for (size_t i = 0; i < n; ++i) b[i] = 0;`r`n#endif`r`n}"
+            $patchText = $patchText -replace $zeroPattern, $zeroReplacement
+
+            $copyPattern = '            for \(size_t i = 0; i < len; \+\+i\) out\[i\] = value\[i\];'
+            if ($patchText -notmatch $copyPattern) { throw 'PatchFile.c copy-loop anchor not found' }
+            $copyReplacement = "#if defined(FW_UEFI_BUILD)`r`n            CopyMem(out, value, len);`r`n#else`r`n            for (size_t i = 0; i < len; ++i) out[i] = value[i];`r`n#endif"
+            $patchText = $patchText -replace $copyPattern, $copyReplacement
+            Set-Content -Path $patchFile -Value $patchText -Encoding ascii -NoNewline
+            Write-Host 'Updated PatchFile.c firmware path to BaseMemoryLib ZeroMem/CopyMem after run #16 CRT linker failure.'
+          }
+
           Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
