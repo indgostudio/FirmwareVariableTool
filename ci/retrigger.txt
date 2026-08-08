@@ -1,0 +1,4 @@
+Trigger PR build after workflow bootstrap on main.
+Run after gEfiLoadedImageProtocolGuid declaration fix.
+Base workflow includes the same fix.
+Generic INF protocol insertion active.
