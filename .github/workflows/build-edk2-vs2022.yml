@@ -51,6 +51,26 @@ jobs:
           }
           $fixed | Set-Content -Path $dsc -Encoding ascii
           Write-Host 'Applied build-failure-driven DSC mappings: DevicePathLib, RegisterFilterLib, CpuLib, PcdLib, StackCheckLib.'
+
+          foreach ($inf in @(
+            'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/ReadOnlyVarTool.inf',
+            'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/WriteVarTool.inf'
+          )) {
+            $infText = Get-Content $inf -Raw
+            if ($infText -notmatch '(?m)^\s*gEfiLoadedImageProtocolGuid\s*$') {
+              if ($infText -notmatch '(?m)^\s*gEfiSimpleFileSystemProtocolGuid\s*$') {
+                throw "Expected gEfiSimpleFileSystemProtocolGuid declaration was not found in $inf"
+              }
+              $infText = [regex]::Replace(
+                $infText,
+                '(?m)^(\s*gEfiSimpleFileSystemProtocolGuid\s*)$',
+                '$1' + "`r`n  gEfiLoadedImageProtocolGuid",
+                1
+              )
+              Set-Content -Path $inf -Value $infText -Encoding ascii -NoNewline
+              Write-Host "Declared gEfiLoadedImageProtocolGuid in $inf after run #13 linker failure."
+            }
+          }
           Get-Content $dsc
 
       - name: Locate Visual Studio 2022 toolchain
