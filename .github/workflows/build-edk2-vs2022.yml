@@ -35,7 +35,6 @@ jobs:
           if (-not (Test-Path 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg/UefiVarToolPkg.dsc')) { throw 'Reviewed UefiVarToolPkg missing after extraction' }
 
       - name: Locate Visual Studio 2022 toolchain
-        id: vs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -52,9 +51,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git clone https://github.com/tianocore/edk2.git edk2
-          git -C edk2 checkout $env:EDK2_COMMIT
-          git -C edk2 submodule update --init --recursive
+          New-Item -ItemType Directory -Path edk2 | Out-Null
+          git -C edk2 init
+          git -C edk2 remote add origin https://github.com/tianocore/edk2.git
+          git -C edk2 fetch --depth 1 origin $env:EDK2_COMMIT
+          git -C edk2 checkout --detach FETCH_HEAD
           $actual = (git -C edk2 rev-parse HEAD).Trim()
           Write-Host "EDK II commit: $actual"
           if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
@@ -112,7 +113,6 @@ jobs:
           "EDK II commit: $env:EDK2_COMMIT" | Add-Content 'efi-artifacts/build.log'
           "Build command: build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc" | Add-Content 'efi-artifacts/build.log'
           Get-FileHash 'efi-artifacts/ReadOnlyVarTool.efi','efi-artifacts/WriteVarTool.efi' -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Add-Content 'efi-artifacts/build.log'
-          Get-ChildItem 'efi-artifacts' | Format-Table Name,Length,LastWriteTime
 
       - name: Upload build diagnostics
         if: always()
