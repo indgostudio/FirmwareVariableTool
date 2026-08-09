@@ -70,17 +70,15 @@ jobs:
           $actualDelta = (Get-FileHash 'inventory-feature.patch.gz' -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualDelta -ne $env:INVENTORY_DELTA_SHA256) { throw "Inventory delta SHA256 mismatch: $actualDelta" }
 
-          function Expand-Gzip([string]$InputPath, [string]$OutputPath) {
-            $inStream = [IO.File]::OpenRead((Join-Path $PWD $InputPath))
+          # Use the exact inline GZipStream pattern proven by accepted run #29.
+          $baseInStream = [IO.File]::OpenRead((Join-Path $PWD 'inventory-feature.patch.gz'))
+          try {
+            $baseGzip = New-Object IO.Compression.GZipStream($baseInStream, [IO.Compression.CompressionMode]::Decompress)
             try {
-              $gzip = New-Object IO.Compression.GZipStream($inStream, [IO.Compression.CompressionMode]::Decompress)
-              try {
-                $output = [IO.File]::Create((Join-Path $PWD $OutputPath))
-                try { $gzip.CopyTo($output) } finally { $output.Dispose() }
-              } finally { $gzip.Dispose() }
-            } finally { $inStream.Dispose() }
-          }
-          Expand-Gzip 'inventory-feature.patch.gz' 'inventory-feature.patch'
+              $baseOutStream = [IO.File]::Create((Join-Path $PWD 'inventory-feature.patch'))
+              try { $baseGzip.CopyTo($baseOutStream) } finally { $baseOutStream.Dispose() }
+            } finally { $baseGzip.Dispose() }
+          } finally { $baseInStream.Dispose() }
 
           $sourceRoot = Join-Path $PWD 'reviewed-src/FirmwareVariableTool'
           $patchDirectory = 'reviewed-src/FirmwareVariableTool'
@@ -102,7 +100,14 @@ jobs:
           if ($supplementalHashFile -ne $env:INVENTORY_SUPPLEMENTAL_SHA256) { throw "Supplemental hash file mismatch: $supplementalHashFile" }
           $supplementalB64 = (Get-Content 'ci/inventory-supplemental.patch.gz.b64' -Raw)
           [IO.File]::WriteAllBytes('inventory-supplemental.patch.gz', [Convert]::FromBase64String($supplementalB64))
-          Expand-Gzip 'inventory-supplemental.patch.gz' 'inventory-supplemental.patch'
+          $supplementalInStream = [IO.File]::OpenRead((Join-Path $PWD 'inventory-supplemental.patch.gz'))
+          try {
+            $supplementalGzip = New-Object IO.Compression.GZipStream($supplementalInStream, [IO.Compression.CompressionMode]::Decompress)
+            try {
+              $supplementalOutStream = [IO.File]::Create((Join-Path $PWD 'inventory-supplemental.patch'))
+              try { $supplementalGzip.CopyTo($supplementalOutStream) } finally { $supplementalOutStream.Dispose() }
+            } finally { $supplementalGzip.Dispose() }
+          } finally { $supplementalInStream.Dispose() }
           $actualSupplemental = (Get-FileHash 'inventory-supplemental.patch' -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualSupplemental -ne $env:INVENTORY_SUPPLEMENTAL_SHA256) { throw "Supplemental patch SHA256 mismatch: $actualSupplemental" }
           git apply --check --directory=$patchDirectory (Join-Path $PWD 'inventory-supplemental.patch')
