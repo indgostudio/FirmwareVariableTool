@@ -1,0 +1,5 @@
+ci/inventory-edk2-compat.patch text eol=lf
+ci/inventory_edk2_compat.sha256 text eol=lf
+ci/apply-inventory-jsonl-fix.py text eol=lf
+ci/test-inventory-jsonl-serializer.py text eol=lf
+ci/inventory_jsonl_fix.sha256 text eol=lf
