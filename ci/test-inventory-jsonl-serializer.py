@@ -40,19 +40,22 @@ def render(segment: str) -> str:
         if name in values:
             out.append(values[name])
             continue
-        # Infer a syntactically safe representative from the literal context:
-        # an immediately preceding quote means the TEXT call supplies string
-        # content; otherwise it supplies a raw JSON scalar.
         rendered = ''.join(out)
         out.append('X' if rendered.endswith('"') else '0')
     return ''.join(out)
 
-readable_line = render(prefix) + render(readable)
+# The regression is specifically the boundary between HexPreview32 and
+# DumpWritten. Close a representative object immediately after DumpWritten so
+# later metadata fields cannot mask or create failures in this focused gate.
+readable = readable[:readable.index('JSON_TEXT(DumpText);') + len('JSON_TEXT(DumpText);')]
+unreadable = unreadable[:unreadable.index('JSON_TEXT(DumpText);') + len('JSON_TEXT(DumpText);')]
+
+readable_line = render(prefix) + render(readable) + '}'
 readable_obj = json.loads(readable_line)
 assert readable_obj['HexPreview32'] == '00A1B2C3'
 assert readable_obj['DumpWritten'] is True
 
-unreadable_line = render(prefix) + render(unreadable)
+unreadable_line = render(prefix) + render(unreadable) + '}'
 unreadable_obj = json.loads(unreadable_line)
 assert unreadable_obj['HexPreview32'] is None
 assert unreadable_obj['DumpWritten'] is True
