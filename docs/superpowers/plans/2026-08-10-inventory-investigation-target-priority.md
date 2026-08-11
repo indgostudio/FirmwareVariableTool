@@ -34,5 +34,6 @@
 - Deliver the replacement InventoryVarTool only; do not authorize WriteVarTool execution.
 
 ## Provenance
-- Target-priority + JSONL transform SHA-256: `89736ffa3673578d155b050295d8883a7187ad5f0697108a220437c805bf99d0`
-- Authoritative workflow pin updated on `main` in commit `e735469f0ff10fa7713dda5fb39964a727980c4a`.
+- Target-priority + JSONL transform SHA-256: `1d8e9ac3e2e143a539497a52f16c75382aa1b7b5f73a9b8a2639e2076cb3fec0`.
+- This is the authoritative Windows-runner hash observed before transform execution in run #21.
+- Authoritative workflow pin updated on `main` in commit `7f10a812866770bd79126f27d2e55c8e76868dfb`.
