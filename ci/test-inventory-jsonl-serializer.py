@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+# Field regression: readable HexPreview32 must close before the common DumpWritten tail.
 source = Path(sys.argv[1]).read_text(encoding='utf-8')
 preview = 'JSON_LITERAL("\\\",\\\"HexPreview32\\\":\\\""); JSON_TEXT(JsonPreview);'
 close = ' JSON_LITERAL("\\\"");'
