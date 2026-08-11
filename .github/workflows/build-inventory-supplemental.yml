@@ -13,12 +13,13 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     env:
-      BUILD_PROFILE: inventory-supplemental
+      BUILD_PROFILE: inventory-supplemental-jsonl-fixed
       EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
       REVIEWED_SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
       INVENTORY_DELTA_SHA256: b3671b57088a96dd47702c64786e97b5002b89174dd393052f250bf213f642e3
       INVENTORY_EDK2_COMPAT_SHA256: ef5e4fbdc1f43be3e4b1cd5a1345782e459a403b4721bfaccfccc64857ada152
       INVENTORY_SUPPLEMENTAL_SHA256: 9c56f881133e7504adb3ea979ff5cce8419ec050acdda27350f3b19ecb5bdd07
+      INVENTORY_JSONL_FIX_SHA256: a74e1c233fa84d8825b009a732ef56089e745f222476fd67821b226cce7a7569
 
     steps:
       - name: Checkout exact PR head
@@ -35,7 +36,8 @@ jobs:
             'ci/source.part00.b64','ci/source.part01.b64','ci/source.part02.b64','ci/source.part03.b64','ci/source.part04.b64',
             'ci/inventory.patch.part00.b64','ci/inventory.patch.part01.b64','ci/inventory_delta.sha256',
             'ci/inventory-edk2-compat.patch','ci/inventory_edk2_compat.sha256',
-            'ci/inventory-supplemental.patch.gz.b64','ci/inventory_supplemental.sha256'
+            'ci/inventory-supplemental.patch.gz.b64','ci/inventory_supplemental.sha256',
+            'ci/apply-inventory-jsonl-fix.py','ci/test-inventory-jsonl-serializer.py','ci/inventory_jsonl_fix.sha256'
           )
           foreach ($path in $required) {
             if (-not (Test-Path $path -PathType Leaf)) { throw "Missing required inventory build input: $path" }
@@ -48,7 +50,8 @@ jobs:
             "REVIEWED_SOURCE_SHA256=$env:REVIEWED_SOURCE_SHA256",
             "INVENTORY_DELTA_SHA256=$env:INVENTORY_DELTA_SHA256",
             "INVENTORY_EDK2_COMPAT_SHA256=$env:INVENTORY_EDK2_COMPAT_SHA256",
-            "INVENTORY_SUPPLEMENTAL_SHA256=$env:INVENTORY_SUPPLEMENTAL_SHA256"
+            "INVENTORY_SUPPLEMENTAL_SHA256=$env:INVENTORY_SUPPLEMENTAL_SHA256",
+            "INVENTORY_JSONL_FIX_SHA256=$env:INVENTORY_JSONL_FIX_SHA256"
           ) | Set-Content contract.log -Encoding ascii
 
           $sourceHashFile = (Get-Content 'ci/source.sha256' -Raw).Trim().ToLowerInvariant()
@@ -70,7 +73,6 @@ jobs:
           $actualDelta = (Get-FileHash 'inventory-feature.patch.gz' -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualDelta -ne $env:INVENTORY_DELTA_SHA256) { throw "Inventory delta SHA256 mismatch: $actualDelta" }
 
-          # Use the exact inline GZipStream pattern proven by accepted run #29.
           $baseInStream = [IO.File]::OpenRead((Join-Path $PWD 'inventory-feature.patch.gz'))
           try {
             $baseGzip = New-Object IO.Compression.GZipStream($baseInStream, [IO.Compression.CompressionMode]::Decompress)
@@ -115,6 +117,16 @@ jobs:
           git apply --directory=$patchDirectory (Join-Path $PWD 'inventory-supplemental.patch')
           if ($LASTEXITCODE -ne 0) { throw 'Failed to apply supplemental inventory patch' }
 
+          $jsonFixHashFile = (Get-Content 'ci/inventory_jsonl_fix.sha256' -Raw).Trim().ToLowerInvariant()
+          if ($jsonFixHashFile -ne $env:INVENTORY_JSONL_FIX_SHA256) { throw "JSONL fix hash file mismatch: $jsonFixHashFile" }
+          $actualJsonFix = (Get-FileHash 'ci/apply-inventory-jsonl-fix.py' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualJsonFix -ne $env:INVENTORY_JSONL_FIX_SHA256) { throw "JSONL fix script SHA256 mismatch: $actualJsonFix" }
+          $inventoryMainPath = Join-Path $sourceRoot 'UefiVarToolPkg/App/InventoryVarTool.c'
+          python 'ci/apply-inventory-jsonl-fix.py' $inventoryMainPath
+          if ($LASTEXITCODE -ne 0) { throw 'JSONL serializer fix failed' }
+          python 'ci/test-inventory-jsonl-serializer.py' $inventoryMainPath
+          if ($LASTEXITCODE -ne 0) { throw 'JSONL serializer contract test failed' }
+
           $pkg = Join-Path $sourceRoot 'UefiVarToolPkg'
           $inventoryInf = Join-Path $pkg 'InventoryVarTool.inf'
           $inventorySources = @(
@@ -134,6 +146,8 @@ jobs:
           foreach ($token in @('FwInventoryProcessSupplementalTargets(','FW_INVENTORY_SUPPLEMENTAL_SEEN_SET','DumpAttempted','DumpStatusCode','Mandatory report output failed')) {
             if (-not $mainText.Contains($token)) { throw "Supplemental inventory source missing token: $token" }
           }
+          if ($mainText.Contains('JSON_LITERAL(",\"DumpWritten\":");')) { throw 'Malformed readable JSONL delimiter remains in source' }
+          if (-not $mainText.Contains('JSON_LITERAL("\",\"DumpWritten\":");')) { throw 'Corrected readable JSONL delimiter missing from source' }
           foreach ($token in @('InventoryUefiReadExact(','CanonicalBytesToGuid(')) {
             if (-not $adapterText.Contains($token)) { throw "Supplemental direct-read source missing token: $token" }
           }
@@ -156,6 +170,7 @@ jobs:
             "INVENTORY_DELTA_ACTUAL_SHA256=$actualDelta",
             "INVENTORY_EDK2_COMPAT_ACTUAL_SHA256=$actualCompat",
             "INVENTORY_SUPPLEMENTAL_ACTUAL_SHA256=$actualSupplemental",
+            "INVENTORY_JSONL_FIX_ACTUAL_SHA256=$actualJsonFix",
             "INVENTORY_SOURCE_SETVARIABLE_MATCHES=$sourceSetVariableMatches"
           ) | ForEach-Object { $_ | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
 
@@ -205,7 +220,7 @@ jobs:
           $cmd = @"
           @echo off
           setlocal
-          echo FirmwareVariableTool supplemental inventory build
+          echo FirmwareVariableTool supplemental inventory JSONL-fixed build
           echo EDK2_COMMIT=%EDK2_COMMIT%
           call "%VS_DEVCMD%" -arch=x86 -host_arch=x64
           if errorlevel 1 exit /b %errorlevel%
@@ -263,7 +278,7 @@ jobs:
 
           @(
             '',
-            '=== SUPPLEMENTAL INVENTORY ACCEPTANCE MANIFEST ===',
+            '=== SUPPLEMENTAL INVENTORY JSONL-FIX ACCEPTANCE MANIFEST ===',
             "BUILD_PROFILE=$env:BUILD_PROFILE",
             "EDK2_COMMIT=$env:EDK2_COMMIT",
             'BUILD_TARGET=RELEASE',
@@ -273,8 +288,10 @@ jobs:
             "INVENTORY_DELTA_SHA256=$env:INVENTORY_DELTA_ACTUAL_SHA256",
             "INVENTORY_EDK2_COMPAT_SHA256=$env:INVENTORY_EDK2_COMPAT_ACTUAL_SHA256",
             "INVENTORY_SUPPLEMENTAL_SHA256=$env:INVENTORY_SUPPLEMENTAL_ACTUAL_SHA256",
+            "INVENTORY_JSONL_FIX_SHA256=$env:INVENTORY_JSONL_FIX_ACTUAL_SHA256",
             "INVENTORY_SOURCE_SETVARIABLE_MATCHES=$env:INVENTORY_SOURCE_SETVARIABLE_MATCHES",
             "INVENTORY_BINARY_SETVARIABLE_MATCHES=$binarySetVariableMatches",
+            'JSONL_SERIALIZER_CONTRACT=PASS',
             'PE_AMD64_VALIDATED=1',
             'BUILD_COMMAND=build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc'
           ) | Add-Content build.log
