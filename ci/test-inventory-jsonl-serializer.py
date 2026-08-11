@@ -25,17 +25,24 @@ assert json.loads(readable) == {'HexPreview32': '00A1B2C3', 'DumpWritten': True}
 assert json.loads(unreadable) == {'HexPreview32': None, 'DumpWritten': False}
 print('inventory JSONL serializer contract: PASS')
 
-# Investigation-priority regression. Emit the exact current target-table source
-# before asserting so a RED run gives enough evidence for a surgical transform.
+# Investigation-priority RED/contract. Targets may live in the portable core,
+# not the UEFI application translation unit, so inspect all package C/headers.
+pkg_root = source_path.parent.parent
 needle_names = (
     'SioIt8669eSetup00', 'AmdSetup', 'Setup', 'Custom', 'D01SetupConfig',
     'D01Custom', 'AMD_PBS_SETUP', 'SystemConfig',
 )
+source_files = sorted(list(pkg_root.rglob('*.c')) + list(pkg_root.rglob('*.h')))
+combined_parts = []
 print('--- supplemental target source evidence ---')
-for lineno, line in enumerate(source.splitlines(), 1):
-    if any(name in line for name in needle_names):
-        print(f'{lineno}: {line}')
+for path in source_files:
+    text = path.read_text(encoding='utf-8')
+    combined_parts.append(f'\n/* FILE:{path.relative_to(pkg_root)} */\n{text}')
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if any(name in line for name in needle_names):
+            print(f'{path.relative_to(pkg_root)}:{lineno}: {line}')
 print('--- end supplemental target source evidence ---')
+combined = ''.join(combined_parts)
 
 expected_names = [
     'SioIt8669eSetup00',
@@ -48,10 +55,9 @@ expected_names = [
 ]
 positions = []
 for name in expected_names:
-    try:
-        positions.append(source.index(f'L"{name}"'))
-    except ValueError as exc:
-        raise AssertionError(f'missing required supplemental target name: {name}') from exc
+    pos = combined.find(name)
+    assert pos >= 0, f'missing required supplemental target name: {name}'
+    positions.append(pos)
 assert positions == sorted(positions), f'supplemental target priority order is wrong: {positions}'
-assert 'L"SystemConfig"' not in source, 'obsolete SystemConfig supplemental target remains'
+assert 'SystemConfig' not in combined, 'obsolete SystemConfig supplemental target remains'
 print('inventory supplemental target priority contract: PASS')
