@@ -32,3 +32,7 @@
 - Verify all seven target names are present in the binary.
 - Re-run ASCII/UTF-16LE `SetVariable` scans.
 - Deliver the replacement InventoryVarTool only; do not authorize WriteVarTool execution.
+
+## Provenance
+- Target-priority + JSONL transform SHA-256: `89736ffa3673578d155b050295d8883a7187ad5f0697108a220437c805bf99d0`
+- Authoritative workflow pin updated on `main` in commit `e735469f0ff10fa7713dda5fb39964a727980c4a`.
