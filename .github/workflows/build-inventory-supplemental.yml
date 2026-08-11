@@ -19,7 +19,7 @@ jobs:
       INVENTORY_DELTA_SHA256: b3671b57088a96dd47702c64786e97b5002b89174dd393052f250bf213f642e3
       INVENTORY_EDK2_COMPAT_SHA256: ef5e4fbdc1f43be3e4b1cd5a1345782e459a403b4721bfaccfccc64857ada152
       INVENTORY_SUPPLEMENTAL_SHA256: 9c56f881133e7504adb3ea979ff5cce8419ec050acdda27350f3b19ecb5bdd07
-      INVENTORY_JSONL_FIX_SHA256: a74e1c233fa84d8825b009a732ef56089e745f222476fd67821b226cce7a7569
+      INVENTORY_JSONL_FIX_SHA256: 9874e1bb29b14215e828114ad505aab996436b05077412b2952f2b509757ff26
 
     steps:
       - name: Checkout exact PR head
@@ -146,8 +146,9 @@ jobs:
           foreach ($token in @('FwInventoryProcessSupplementalTargets(','FW_INVENTORY_SUPPLEMENTAL_SEEN_SET','DumpAttempted','DumpStatusCode','Mandatory report output failed')) {
             if (-not $mainText.Contains($token)) { throw "Supplemental inventory source missing token: $token" }
           }
-          if ($mainText.Contains('JSON_LITERAL(",\"DumpWritten\":");')) { throw 'Malformed readable JSONL delimiter remains in source' }
-          if (-not $mainText.Contains('JSON_LITERAL("\",\"DumpWritten\":");')) { throw 'Corrected readable JSONL delimiter missing from source' }
+          if (-not $mainText.Contains('JSON_TEXT(JsonPreview); JSON_LITERAL("\"");')) { throw 'Readable HexPreview32 quote closure missing from source' }
+          if (-not $mainText.Contains('JSON_LITERAL(",\"DumpWritten\":");')) { throw 'Common DumpWritten tail missing from source' }
+          if ($mainText.Contains('JSON_LITERAL("\",\"DumpWritten\":");')) { throw 'DumpWritten common tail must not close the readable preview' }
           foreach ($token in @('InventoryUefiReadExact(','CanonicalBytesToGuid(')) {
             if (-not $adapterText.Contains($token)) { throw "Supplemental direct-read source missing token: $token" }
           }
