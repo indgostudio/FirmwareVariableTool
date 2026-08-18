@@ -192,7 +192,7 @@ jobs:
           $restoreHash = (Get-FileHash $restore -Algorithm SHA256).Hash.ToLowerInvariant()
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Copy-Item $restore artifacts/AmdPbsAl1FanRestoreTool.efi
-          Copy-Item edk2/build.log artifacts/build.log
+          Copy-Item build.log artifacts/build.log
           @("TARGET=AmdPbsAl1FanRestoreTool.efi","SHA256=$restoreHash","DELTA_SHA256=$env:DELTA_SHA256","SOURCE_SHA256=$env:SOURCE_SHA256","EDK2_COMMIT=$env:EDK2_COMMIT","READONLY_SHA256=$roHash","WRITER_SHA256=$wrHash","RESTORE_CRC32=0x6EE713B1","DIFF=0x004B:0x46->0x0F") | Set-Content artifacts/acceptance-manifest.txt
           Write-Host "Restore EFI SHA256: $restoreHash"
 
