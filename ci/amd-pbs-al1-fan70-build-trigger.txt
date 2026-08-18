@@ -1,0 +1,2 @@
+Trigger targeted AMD PBS AL1 fan-70 build after PR creation.
+Implementation delta remains pinned to 527ddbffb396a506de2d4ff0ad4caf38ffa65b61.
