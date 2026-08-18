@@ -1,0 +1,285 @@
+name: Build targeted AMD PBS AL1 fan-70 patcher
+
+on:
+  push:
+    branches: [agent/amd-pbs-al1-fan70-patcher]
+  pull_request:
+    branches: [build/vs2022-edk2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      EDK2_COMMIT: c5aa7e7d94c0e6b3c0202e15dbf7a5c92dd6a01d
+      SOURCE_SHA256: 6d55b8a8afa0a1808379b62c6712bc8b0170b6225a7dd073822e0a38c38442c1
+      DELTA_SHA256: ed21dc56f27418a8da92d5b4dd6c65e3904f1c7fd743d31e5697f73e292cf618
+      READONLY_SHA256: f1154e0eea35acaa6fef96b5a455dbb812d5d62c268e196e9e9edaf49a41bc14
+      WRITER_SHA256: 441b459b20939cfd61ee3ebbb2338b481e9edf84f246370c3b806ea2f5cfa70d
+
+    steps:
+      - name: Checkout patch branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct reviewed source and apply targeted delta
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = Get-ChildItem 'ci/source.part*.b64' | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 reviewed source parts, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('FirmwareVariableTool-source.zip', [Convert]::FromBase64String($b64))
+          $actual = (Get-FileHash 'FirmwareVariableTool-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Reviewed source SHA256: $actual"
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Reviewed source SHA256 mismatch: $actual" }
+
+          $deltaParts = Get-ChildItem 'ci/amd-pbs-al1-fan70.patch.part*.b64' | Sort-Object Name
+          if ($deltaParts.Count -ne 7) { throw "Expected 7 targeted delta parts, found $($deltaParts.Count)" }
+          $deltaB64 = ($deltaParts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('amd-pbs-al1-fan70.patch', [Convert]::FromBase64String($deltaB64))
+          $deltaActual = (Get-FileHash 'amd-pbs-al1-fan70.patch' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Targeted delta SHA256: $deltaActual"
+          if ($deltaActual -ne $env:DELTA_SHA256) { throw "Targeted delta SHA256 mismatch: $deltaActual" }
+
+          Expand-Archive 'FirmwareVariableTool-source.zip' -DestinationPath 'reviewed-src'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'reviewed-src/FirmwareVariableTool'
+          Push-Location $src
+          git init | Out-Null
+          git apply --check "$env:GITHUB_WORKSPACE/amd-pbs-al1-fan70.patch"
+          if ($LASTEXITCODE -ne 0) { throw 'Targeted delta preflight failed' }
+          git apply "$env:GITHUB_WORKSPACE/amd-pbs-al1-fan70.patch"
+          if ($LASTEXITCODE -ne 0) { throw 'Targeted delta application failed' }
+          Pop-Location
+
+          $required = @(
+            "$src/UefiVarToolPkg/AmdPbsAl1Fan70PatchTool.inf",
+            "$src/UefiVarToolPkg/App/AmdPbsAl1Fan70PatchTool.c",
+            "$src/UefiVarToolPkg/App/Core/Al1Fan70Patch.c",
+            "$src/UefiVarToolPkg/App/Core/Al1Fan70Patch.h",
+            "$src/host/tests/test_al1_fan70_patch.c"
+          )
+          foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Targeted delta missing $path" } }
+
+          # Static target/safety contract: the dedicated app is not the generic writer.
+          $inf = Get-Content "$src/UefiVarToolPkg/AmdPbsAl1Fan70PatchTool.inf" -Raw
+          if ($inf -match 'App/UefiMain\.c|PatchFile\.c|PatchModel\.c') { throw 'Targeted INF unexpectedly includes generic writer/patch-file source' }
+          if ($inf -notmatch 'App/AmdPbsAl1Fan70PatchTool\.c') { throw 'Targeted INF entry source missing' }
+          $core = Get-Content "$src/UefiVarToolPkg/App/Core/Al1Fan70Patch.h" -Raw
+          foreach ($needle in @('0x90u','0x4Bu','0x0Fu','0x46u','0x00000007u','0x518B7640u','I_ACCEPT_FIRMWARE_RISK')) {
+            if ($core -notmatch [regex]::Escape($needle)) { throw "Compiled safety constant missing: $needle" }
+          }
+
+      - name: Run host regression suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'reviewed-src/FirmwareVariableTool'
+          cmake -S "$src/host" -B "$src/build-host"
+          if ($LASTEXITCODE -ne 0) { throw 'Host CMake configure failed' }
+          cmake --build "$src/build-host" --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'Host test build failed' }
+          ctest --test-dir "$src/build-host" -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Host regression suite failed' }
+
+      - name: Apply reviewed EDK II compatibility fixes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg'
+          $dsc = "$pkg/UefiVarToolPkg.dsc"
+          if (-not (Test-Path $dsc)) { throw 'Patched UefiVarToolPkg missing' }
+
+          $fixed = New-Object System.Collections.Generic.List[string]
+          foreach ($line in Get-Content $dsc) {
+            $fixed.Add($line)
+            if ($line -eq '  DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf') {
+              $fixed.Add('  DevicePathLib|MdePkg/Library/UefiDevicePathLib/UefiDevicePathLib.inf')
+              $fixed.Add('  RegisterFilterLib|MdePkg/Library/RegisterFilterLibNull/RegisterFilterLibNull.inf')
+              $fixed.Add('  CpuLib|MdePkg/Library/BaseCpuLib/BaseCpuLib.inf')
+            }
+            if ($line -eq '  MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf') {
+              $fixed.Add('  PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf')
+            }
+            if ($line -eq '  PrintLib|MdePkg/Library/BasePrintLib/BasePrintLib.inf') {
+              $fixed.Add('  StackCheckLib|MdePkg/Library/StackCheckLibNull/StackCheckLibNull.inf')
+            }
+          }
+          $fixed | Set-Content -Path $dsc -Encoding ascii
+
+          foreach ($infPath in @("$pkg/ReadOnlyVarTool.inf", "$pkg/WriteVarTool.inf")) {
+            $lines = @(Get-Content $infPath)
+            if (-not ($lines | Where-Object { $_.Trim() -eq 'gEfiLoadedImageProtocolGuid' })) {
+              $protocolIndex = -1
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i].Trim() -eq '[Protocols]') { $protocolIndex = $i; break }
+              }
+              $outLines = New-Object System.Collections.Generic.List[string]
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                $outLines.Add($lines[$i])
+                if ($i -eq $protocolIndex) { $outLines.Add('  gEfiLoadedImageProtocolGuid') }
+              }
+              if ($protocolIndex -lt 0) {
+                $outLines.Add('')
+                $outLines.Add('[Protocols]')
+                $outLines.Add('  gEfiLoadedImageProtocolGuid')
+              }
+              $outLines | Set-Content -Path $infPath -Encoding ascii
+            }
+          }
+
+          $patchFile = "$pkg/App/Core/PatchFile.c"
+          $patchText = Get-Content $patchFile -Raw
+          if ($patchText -notmatch '#include <Library/BaseMemoryLib\.h>') {
+            $includePattern = '#include "PatchFile\.h"\r?\n'
+            if ($patchText -notmatch $includePattern) { throw 'PatchFile.c include anchor not found' }
+            $patchText = $patchText -replace $includePattern, "#include `"PatchFile.h`"`r`n`r`n#if defined(FW_UEFI_BUILD)`r`n#include <Library/BaseMemoryLib.h>`r`n#endif`r`n"
+            $zeroPattern = 'static void FwZero\(void\* p, size_t n\) \{\r?\n    unsigned char\* b = \(unsigned char\*\)p;\r?\n    for \(size_t i = 0; i < n; \+\+i\) b\[i\] = 0;\r?\n\}'
+            if ($patchText -notmatch $zeroPattern) { throw 'PatchFile.c FwZero anchor not found' }
+            $zeroReplacement = "static void FwZero(void* p, size_t n) {`r`n#if defined(FW_UEFI_BUILD)`r`n    ZeroMem(p, n);`r`n#else`r`n    unsigned char* b = (unsigned char*)p;`r`n    for (size_t i = 0; i < n; ++i) b[i] = 0;`r`n#endif`r`n}"
+            $patchText = $patchText -replace $zeroPattern, $zeroReplacement
+            $copyPattern = '            for \(size_t i = 0; i < len; \+\+i\) out\[i\] = value\[i\];'
+            if ($patchText -notmatch $copyPattern) { throw 'PatchFile.c copy-loop anchor not found' }
+            $copyReplacement = "#if defined(FW_UEFI_BUILD)`r`n            CopyMem(out, value, len);`r`n#else`r`n            for (size_t i = 0; i < len; ++i) out[i] = value[i];`r`n#endif"
+            $patchText = $patchText -replace $copyPattern, $copyReplacement
+            Set-Content -Path $patchFile -Value $patchText -Encoding ascii -NoNewline
+          }
+
+      - name: Locate Visual Studio 2022 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio 2022 with C++ tools not found' }
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          if (-not (Test-Path $devcmd)) { throw "VsDevCmd.bat missing: $devcmd" }
+          "VS_INSTALL=$vs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VS_DEVCMD=$devcmd" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install pinned NASM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nasm --version=2.16.03 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Chocolatey NASM install failed with exit code $LASTEXITCODE" }
+          $nasmPath = 'C:\Program Files\NASM\nasm.exe'
+          if (-not (Test-Path $nasmPath)) { throw "NASM executable not found: $nasmPath" }
+          (Split-Path $nasmPath -Parent) | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Checkout pinned EDK II
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path edk2 | Out-Null
+          git -C edk2 init
+          git -C edk2 remote add origin https://github.com/tianocore/edk2.git
+          git -C edk2 fetch --depth 1 origin $env:EDK2_COMMIT
+          git -C edk2 checkout --detach FETCH_HEAD
+          $actual = (git -C edk2 rev-parse HEAD).Trim()
+          if ($actual -ne $env:EDK2_COMMIT) { throw "EDK II commit mismatch: $actual" }
+          git -C edk2 submodule update --init --depth 1 BaseTools/Source/C/BrotliCompress/brotli MdePkg/Library/MipiSysTLib/mipisyst
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize required EDK II submodules' }
+          Copy-Item -Recurse -Force 'reviewed-src/FirmwareVariableTool/UefiVarToolPkg' 'edk2/UefiVarToolPkg'
+
+      - name: Build X64 RELEASE with VS2022
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = $env:GITHUB_WORKSPACE
+          $cmd = @"
+          @echo off
+          setlocal
+          echo ============================================================
+          echo AmdPbsAl1Fan70PatchTool reproducible EDK II build
+          echo EDK2_COMMIT=%EDK2_COMMIT%
+          echo VS_INSTALL=%VS_INSTALL%
+          echo ============================================================
+          call "%VS_DEVCMD%" -arch=x86 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          "%VCToolsInstallDir%bin\Hostx64\x64\cl.exe" /Bv
+          ver >nul
+          where nasm
+          nasm -v
+          if errorlevel 1 exit /b %errorlevel%
+          cd /d "$workspace\edk2"
+          call edksetup.bat Rebuild VS2022
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenFw.exe" exit /b 90
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenFfs.exe" exit /b 91
+          if not exist "%EDK_TOOLS_PATH%\Bin\Win32\GenSec.exe" exit /b 92
+          git rev-parse HEAD
+          build -a X64 -b RELEASE -t VS2022 -p UefiVarToolPkg\UefiVarToolPkg.dsc
+          exit /b %errorlevel%
+          "@
+          Set-Content -Path 'build-vs2022.cmd' -Value $cmd -Encoding ascii
+          cmd.exe /d /c 'build-vs2022.cmd > build.log 2>&1'
+          $code = $LASTEXITCODE
+          Get-Content 'build.log'
+          if ($code -ne 0) { throw "EDK II build failed with exit code $code" }
+
+      - name: Verify legacy isolation and targeted artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'edk2/Build/UefiVarTool/RELEASE_VS2022/X64'
+          $readOnly = Join-Path $out 'ReadOnlyVarTool.efi'
+          $writer = Join-Path $out 'WriteVarTool.efi'
+          $targeted = Join-Path $out 'AmdPbsAl1Fan70PatchTool.efi'
+          foreach ($path in @($readOnly,$writer,$targeted)) { if (-not (Test-Path $path)) { throw "Missing artifact: $path" } }
+
+          $readHash = (Get-FileHash $readOnly -Algorithm SHA256).Hash.ToLowerInvariant()
+          $writerHash = (Get-FileHash $writer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $targetHash = (Get-FileHash $targeted -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($readHash -ne $env:READONLY_SHA256) { throw "ReadOnlyVarTool changed unexpectedly: $readHash" }
+          if ($writerHash -ne $env:WRITER_SHA256) { throw "WriteVarTool changed unexpectedly: $writerHash" }
+
+          New-Item -ItemType Directory -Force -Path 'efi-artifacts' | Out-Null
+          Copy-Item $readOnly 'efi-artifacts/ReadOnlyVarTool.efi'
+          Copy-Item $writer 'efi-artifacts/WriteVarTool.efi'
+          Copy-Item $targeted 'efi-artifacts/AmdPbsAl1Fan70PatchTool.efi'
+          Copy-Item 'build.log' 'efi-artifacts/build.log'
+
+          $manifest = @(
+            'BUILD_PROFILE=amd-pbs-al1-fan70-targeted',
+            "EDK2_COMMIT=$env:EDK2_COMMIT",
+            'BUILD_TARGET=RELEASE',
+            'BUILD_ARCH=X64',
+            'TOOLCHAIN=VS2022',
+            "REVIEWED_SOURCE_SHA256=$env:SOURCE_SHA256",
+            "TARGETED_DELTA_SHA256=$env:DELTA_SHA256",
+            'VARIABLE_NAME=AMD_PBS_SETUP',
+            'VARIABLE_GUID=A339D746-F678-49B3-9FC7-54CE0F9DF226',
+            'VARIABLE_SIZE=0x90',
+            'REQUIRED_ATTRIBUTES=0x7',
+            'REQUIRED_ORIGINAL_CRC32=0x518B7640',
+            'PATCH_OFFSET=0x4B',
+            'PATCH_EXPECTED_OLD=0x0F',
+            'PATCH_NEW=0x46',
+            'CONFIRMATION=I_ACCEPT_FIRMWARE_RISK',
+            'GENERIC_WRITER_UNCHANGED=PASS',
+            "ReadOnlyVarTool.efi SHA256=$readHash",
+            "WriteVarTool.efi SHA256=$writerHash",
+            "AmdPbsAl1Fan70PatchTool.efi SHA256=$targetHash"
+          )
+          $manifest | Set-Content 'efi-artifacts/acceptance-manifest.txt' -Encoding ascii
+          $manifest | ForEach-Object { Write-Host $_ }
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmdPbsAl1Fan70PatchTool-build-log
+          path: |
+            build.log
+            build-vs2022.cmd
+          if-no-files-found: warn
+
+      - name: Upload EFI binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmdPbsAl1Fan70PatchTool-efi
+          path: efi-artifacts/
+          if-no-files-found: error
